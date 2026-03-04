@@ -137,6 +137,20 @@ Features that will be supported in the near future:
 
 Contributions welcome! 
 
-## History 
+## Citation
+
+```bibtex
+@misc{kumar2026speculativespeculativedecoding,
+      title={Speculative Speculative Decoding},
+      author={Tanishq Kumar and Tri Dao and Avner May},
+      year={2026},
+      eprint={2603.03251},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2603.03251},
+}
+```
+
+## History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=tanishqkumar/ssd&type=Date)](https://star-history.com/#tanishqkumar/ssd&Date)
