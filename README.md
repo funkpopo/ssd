@@ -9,10 +9,14 @@
        src="https://github.com/user-attachments/assets/4a38ae2d-e809-41ed-881e-fa94af820a17" />
 </p>
 
-SSD is a new LLM inference algorithm. It is exact, and it is extremely fast. 
+> *"In all fictions, each time a man meets diverse alternatives, he chooses one and eliminates the others; in the work of the almost unfathomable Ts'ui Pên, he chooses — simultaneously — all of them."*
+>
+> — Jorge Luis Borges, "The Garden of Forking Paths" (1941)
+
+**SSD is a new LLM inference algorithm. It is exact, and it is extremely fast.**
 
 This custom inference engine supports: 
-- A detailed and performant implementation of the SSD algorithm
+- A reference implementation of the SSD algorithm
 - Optimized SD and autoregressive baselines
 - Qwen3 + Llama3 model families
 - Tensor Parallelism
@@ -26,9 +30,11 @@ As a result, SSD achieves up to 2x faster inference than some of the strongest i
   </td></tr></table>
 </div>
 
-SSD is conceptually a new type of speculative decoding (SD) where drafting and verification, usually sequential processes with a serial dependence, are parallelized. 
-Doing this presents a number of challenges, and the focus of the paper and codebase is in resolving these challenges to get maximal performance. 
-SSD, like SD, is lossless, i.e. will sample from the same distribution as autoregressive decoding. 
+SSD is a new type of speculative decoding (SD). In normal SD, a small and fast model guesses the next few tokens that a larger slower model may generate, 
+and the large model then verifies them in one forward pass: drafting and verification happen one after the other. 
+
+In SSD, they happen in parallel. The small model _anticipates_ likely verification outcomes in advance, and speculates for _all of them_ at once. If it guessed correctly, 
+the speculation can be returned immediately so drafting overhead is eliminated entirely. 
 
 ## Setup
 
