@@ -48,7 +48,15 @@ def _get_layer_types(config) -> list[str]:
     layer_types = getattr(config, "layer_types", None)
     if layer_types is None:
         return ["full_attention"] * int(config.num_hidden_layers)
-    return list(layer_types)
+    layer_types = list(layer_types)
+    num_non_full = sum(layer_type != "full_attention" for layer_type in layer_types)
+    if num_non_full > 0:
+        print(
+            f"[Qwen35TextModel] remapping {num_non_full}/{len(layer_types)} non-full layer_types "
+            "to full_attention for unified Attention+KV cache path",
+            flush=True,
+        )
+    return ["full_attention"] * len(layer_types)
 
 
 def _build_default_mrope_section(rotary_dim: int) -> list[int]:
@@ -857,37 +865,29 @@ class Qwen35DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_type = layer_type
-        if self.layer_type == "full_attention":
-            rope_parameters = _get_rope_parameters(config)
-            self.self_attn = Qwen35TextAttention(
-                hidden_size=config.hidden_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=config.num_key_value_heads,
-                max_position=config.max_position_embeddings,
-                rms_norm_eps=config.rms_norm_eps,
-                qkv_bias=getattr(config, "attention_bias", False),
-                head_dim=getattr(config, "head_dim", None),
-                rope_parameters=rope_parameters,
-                use_mrope=use_mrope,
-                draft=draft,
-                speculate=speculate,
-                spec_k=spec_k,
-                async_fan_out=async_fan_out,
-                draft_async=draft_async,
-                tp_group=tp_group,
-                tp_size=tp_size,
+        if self.layer_type != "full_attention":
+            raise ValueError(
+                f"Unsupported layer_type '{self.layer_type}' for unified Qwen35DecoderLayer path"
             )
-            self.linear_attn = None
-        elif self.layer_type == "linear_attention":
-            self.self_attn = None
-            self.linear_attn = Qwen35LinearAttention(
-                config=config,
-                layer_idx=layer_idx,
-                tp_group=tp_group,
-                tp_size=tp_size,
-            )
-        else:
-            raise ValueError(f"Unsupported layer_type '{self.layer_type}' for Qwen35DecoderLayer")
+        rope_parameters = _get_rope_parameters(config)
+        self.self_attn = Qwen35TextAttention(
+            hidden_size=config.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            max_position=config.max_position_embeddings,
+            rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=getattr(config, "attention_bias", False),
+            head_dim=getattr(config, "head_dim", None),
+            rope_parameters=rope_parameters,
+            use_mrope=use_mrope,
+            draft=draft,
+            speculate=speculate,
+            spec_k=spec_k,
+            async_fan_out=async_fan_out,
+            draft_async=draft_async,
+            tp_group=tp_group,
+            tp_size=tp_size,
+        )
 
         self.mlp = Qwen35MLP(
             hidden_size=config.hidden_size,
@@ -910,12 +910,7 @@ class Qwen35DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        if self.layer_type == "linear_attention":
-            assert self.linear_attn is not None
-            hidden_states = self.linear_attn(positions, hidden_states)
-        else:
-            assert self.self_attn is not None
-            hidden_states = self.self_attn(positions, hidden_states)
+        hidden_states = self.self_attn(positions, hidden_states)
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
@@ -944,7 +939,8 @@ class Qwen35TextModel(nn.Module):
                 f"Qwen35TextModel: layer_types length={len(self.layer_types)} "
                 f"does not match num_hidden_layers={config.num_hidden_layers}"
             )
-        self.has_linear_attention = any(layer_type == "linear_attention" for layer_type in self.layer_types)
+        # Unified runtime path: all Qwen3.5 layers use Attention + KV cache.
+        self.has_linear_attention = False
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -974,9 +970,7 @@ class Qwen35TextModel(nn.Module):
         self.norm = RMSDNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def reset_state_cache(self):
-        for layer in self.layers:
-            if getattr(layer, "linear_attn", None) is not None:
-                layer.linear_attn.reset_state_cache()
+        return
 
     def _apply_deepstack(
         self,
@@ -1080,7 +1074,6 @@ class Qwen35ForCausalLM(nn.Module):
             tp_group=tp_group,
             tp_size=self.tp_size,
         )
-        self.requires_eager = self.model.has_linear_attention
         self.async_fan_out = async_fan_out
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -1820,7 +1813,6 @@ class Qwen35VLForConditionalGeneration(nn.Module):
             tp_group=tp_group,
             tp_size=self.tp_size,
         )
-        self.requires_eager = self.model.has_linear_attention
         self.lm_head = ParallelLMHead(
             config.text_config.vocab_size,
             config.text_config.hidden_size,
