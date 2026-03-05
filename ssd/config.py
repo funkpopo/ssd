@@ -50,7 +50,10 @@ class Config:
 
     def __post_init__(self):
         model = self.model 
-        assert os.path.isdir(model)
+        assert os.path.isdir(model), (
+            f"Model path does not exist: {model!r}. "
+            "Pass an explicit model path or set SSD_TARGET_MODEL/SSD_HF_CACHE."
+        )
 
         assert 1 <= self.num_gpus <= 8 # this codebase only works on one node 
         self.hf_config = AutoConfig.from_pretrained(model)

@@ -126,6 +126,84 @@ python -O chat.py --sglang --ar   # autoregressive
 python -O chat.py --vllm          # spec decode
 ```
 
+### OpenAI-Compatible HTTP Server
+
+SSD now ships an OpenAI-compatible HTTP server with `completions` and `chat.completions` endpoints.
+
+Install server deps:
+
+```bash
+uv sync --extra server
+```
+
+Start server:
+
+```bash
+# local path
+python -m ssd.openai_server \
+  --model /path/to/local/model_snapshot \
+  --gpus 4 \
+  --spec --k 6 \
+  --draft /path/to/local/draft_snapshot \
+  --port 8000
+```
+
+Async SSD mode:
+
+```bash
+# HuggingFace repo id
+python -m ssd.openai_server \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --gpus 5 \
+  --spec --async --k 7 --f 3 \
+  --draft meta-llama/Llama-3.2-1B-Instruct \
+  --port 8000
+```
+
+`--model` can be either:
+- an existing local model directory containing `config.json`, or
+- a HuggingFace repo id (resolved to local snapshot automatically).
+
+This server path does not require `SSD_HF_CACHE`.
+
+When `--model`/`--draft` is not a local directory, SSD treats it as a HuggingFace repo id and resolves it to a local snapshot automatically.  
+Use `--model-revision` / `--draft-revision` to pin revisions, and `--local-files-only` for offline/cache-only mode.
+
+Quick checks:
+
+```bash
+curl http://localhost:8000/health
+curl http://localhost:8000/v1/models
+```
+
+Completion request:
+
+```bash
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ignored-by-ssd",
+    "prompt": "Write one sentence about speculative decoding.",
+    "temperature": 0,
+    "max_tokens": 64
+  }'
+```
+
+Chat completion request:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ignored-by-ssd",
+    "messages": [
+      {"role": "user", "content": "Give me three bullet points on SSD."}
+    ],
+    "temperature": 0,
+    "max_tokens": 128
+  }'
+```
+
 ### Roadmap
 
 Features that will be supported in the near future: 
