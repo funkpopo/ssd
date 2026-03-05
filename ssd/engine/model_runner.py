@@ -1,6 +1,8 @@
 
 import pickle
 import time
+import importlib.util
+from pathlib import Path
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -10,7 +12,6 @@ import os
 import flashinfer
 from ssd.config import Config
 from ssd.engine.sequence import Sequence
-from ssd.models.qwen3 import Qwen3ForCausalLM
 from ssd.models.llama3 import LlamaForCausalLM
 from ssd.models.eagle3_draft_llama3 import Eagle3DraftForCausalLM
 from ssd.layers.sampler import Sampler
@@ -33,6 +34,24 @@ from ssd.engine.helpers.cudagraph_helpers import (
     get_custom_mask,
 )
     
+
+_QWEN35_MODULE = None
+
+
+def _get_qwen35_model_classes():
+    global _QWEN35_MODULE
+    if _QWEN35_MODULE is None:
+        module_path = Path(__file__).resolve().parents[1] / "models" / "qwen3-5.py"
+        if not module_path.exists():
+            raise FileNotFoundError(f"Qwen3.5 model file not found: {module_path}")
+        spec = importlib.util.spec_from_file_location("ssd.models.qwen3_5_runtime", str(module_path))
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Could not load module spec for {module_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _QWEN35_MODULE = module
+    return _QWEN35_MODULE.Qwen35ForCausalLM, _QWEN35_MODULE.Qwen35VLForConditionalGeneration
+
 
 class ModelRunner:
 
@@ -219,8 +238,12 @@ class ModelRunner:
             model_class = Eagle3DraftForCausalLM
         elif hf_config.model_type == 'llama':
             model_class = LlamaForCausalLM
-        elif hf_config.model_type == 'qwen3':
-            model_class = Qwen3ForCausalLM
+        elif hf_config.model_type in ['qwen3_5', 'qwen3_vl']:
+            _, qwen35_vl_cls = _get_qwen35_model_classes()
+            model_class = qwen35_vl_cls
+        elif hf_config.model_type in ['qwen3_5_text', 'qwen3']:
+            qwen35_text_cls, _ = _get_qwen35_model_classes()
+            model_class = qwen35_text_cls
         else:
             raise ValueError(f"Unsupported model type: {hf_config.model_type}")
 
@@ -245,6 +268,12 @@ class ModelRunner:
             kwargs['debug_mode'] = config.debug_mode
             
         self.model = model_class(**kwargs)
+        if getattr(self.model, "requires_eager", False) and not self.enforce_eager:
+            print(
+                "[model_runner] forcing eager mode: model requires stateful linear_attention path",
+                flush=True,
+            )
+            self.enforce_eager = True
 
         model_type = "DRAFT " if self.is_draft else "TARGET "
         if self.verbose:
@@ -441,6 +470,8 @@ class ModelRunner:
             hidden_states = torch.zeros(num_tokens, 3 * d_model_target, dtype=self.hf_config.torch_dtype, device=self.device)
         
         self.run(seqs, True, hidden_states=hidden_states)
+        if hasattr(self.model, "reset_state_cache"):
+            self.model.reset_state_cache()
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
@@ -511,9 +542,12 @@ class ModelRunner:
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = prepare_block_tables_from_seqs(
                 seqs, self.is_draft)
-        
+        seq_ids = torch.tensor([s.seq_id for s in seqs], dtype=torch.int64, device=self.device)
+        context_lens = torch.tensor([len(s) for s in seqs], dtype=torch.int32, device=self.device)
+
         set_context(is_prefill=True, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_k, max_seqlen_q=max_seqlen_q,
-                    max_seqlen_k=max_seqlen_k, slot_mapping=slot_mapping, context_lens=None, block_tables=block_tables)
+                    max_seqlen_k=max_seqlen_k, slot_mapping=slot_mapping, context_lens=context_lens,
+                    block_tables=block_tables, seq_ids=seq_ids, block_size=self.block_size)
         return input_ids, positions
     
     def prepare_decode(self, seqs: list[Sequence], verify: bool = False): 
@@ -522,6 +556,7 @@ class ModelRunner:
 
         
         block_tables = prepare_block_tables_from_seqs(seqs, self.is_draft) # if verify, set cu_seqlens_q as well
+        seq_ids = torch.tensor([s.seq_id for s in seqs], dtype=torch.int64, device=self.device)
 
         if verify: ### what path does glue decode take? trace it. 
             # this had [not draft and draft_async] condn before
@@ -531,11 +566,12 @@ class ModelRunner:
             set_context(is_prefill=False, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=None, 
                        max_seqlen_q=self.config.speculate_k + 1, max_seqlen_k=0,
                        slot_mapping=slot_mapping, context_lens=context_lens, 
-                       block_tables=block_tables) 
+                       block_tables=block_tables, seq_ids=seq_ids, block_size=self.block_size) 
         else: # sq_decode path, draft (sync spec) or target (normal)
             set_context(is_prefill=False, cu_seqlens_q=None, cu_seqlens_k=None, 
                        max_seqlen_q=0, max_seqlen_k=0, slot_mapping=slot_mapping, 
-                       context_lens=context_lens, block_tables=block_tables)
+                       context_lens=context_lens, block_tables=block_tables,
+                       seq_ids=seq_ids, block_size=self.block_size)
         
         return input_ids, positions
 

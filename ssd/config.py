@@ -49,6 +49,37 @@ class Config:
         return (self.max_model_len + self.kvcache_block_size - 1) // self.kvcache_block_size
 
     def __post_init__(self):
+        def _inject_text_backbone_fields(cfg: AutoConfig):
+            # Qwen3.5/Qwen3-VL style configs expose most LLM runtime fields under `text_config`.
+            text_cfg = getattr(cfg, "text_config", None)
+            if text_cfg is None:
+                return
+            for name in [
+                "vocab_size",
+                "hidden_size",
+                "intermediate_size",
+                "num_hidden_layers",
+                "num_attention_heads",
+                "num_key_value_heads",
+                "head_dim",
+                "max_position_embeddings",
+                "rms_norm_eps",
+                "hidden_act",
+                "attention_bias",
+                "attention_dropout",
+                "layer_types",
+                "linear_conv_kernel_dim",
+                "linear_key_head_dim",
+                "linear_value_head_dim",
+                "linear_num_key_heads",
+                "linear_num_value_heads",
+                "rope_parameters",
+                "rope_theta",
+                "rope_scaling",
+            ]:
+                if hasattr(text_cfg, name):
+                    setattr(cfg, name, getattr(text_cfg, name))
+
         model = self.model 
         assert os.path.isdir(model), (
             f"Model path does not exist: {model!r}. "
@@ -57,11 +88,13 @@ class Config:
 
         assert 1 <= self.num_gpus <= 8 # this codebase only works on one node 
         self.hf_config = AutoConfig.from_pretrained(model)
+        _inject_text_backbone_fields(self.hf_config)
         self.max_model_len = min(
             self.max_model_len, self.hf_config.max_position_embeddings) 
         if self.speculate: 
             draft = self.draft
             self.draft_hf_config = AutoConfig.from_pretrained(draft)
+            _inject_text_backbone_fields(self.draft_hf_config)
             self.max_model_len = min(
                 self.max_model_len, self.draft_hf_config.max_position_embeddings)
             if self.draft_async:
